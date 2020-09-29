@@ -16,12 +16,12 @@ function log_message($message) {
     write-host "[$(get_utc_iso8601_time)] $message"
 }
 
-function get_disk_number($image, $tries=5, $tryInterval=1) {
+function get_disk_number($image, $tries=5, $tryInterval=2) {
     while ($tries) {
         $mappingJson = rbd-wnbd show $image --format=json
         $mappingJson = $mappingJson | ConvertFrom-Json
         $diskNumber = $mappingJson.disk_number
-        if ($diskNumber) {
+        if ($diskNumber -gt 0) {
             echo $diskNumber
             return
         }
@@ -45,6 +45,13 @@ function check_files($path, $count) {
             throw "Invalid file $file content: $content"
         }
     }
+}
+
+function eject_volume($driveLetter) {
+    $vol = gwmi -Class win32_volume | ? { $_.Name -eq "${driveLetter}:\" }
+    # $vol.DriveLetter = $null
+    # $vol.Put()
+    $vol.Dismount($false, $false)
 }
 
 $uuid = [guid]::NewGuid().Guid
@@ -79,7 +86,10 @@ try {
     write_files $testPath $testFileCount
     # flush-volume $driveLetter
     # set-disk -Number $diskNumber -IsOffline:$true
+    log_message "Ejecting volume"
+    eject_volume $driveLetter
 
+    log_message "Unmapping image"
     rbd-wnbd unmap $imageName
     $mapped = $false
 
