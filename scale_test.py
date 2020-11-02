@@ -100,13 +100,16 @@ def array_stats(array):
     mean = sum(array) / len(array)
     variance = sum((i - mean) ** 2 for i in array) / len(array)
     std_dev = math.sqrt(variance)
+    sorted_array = sorted(array)
 
     return {
         'min': min(array),
         'max': max(array),
         'sum': sum(array),
         'mean': mean,
-        'median': sorted(array)[len(array) // 2],
+        'median': sorted_array[len(array) // 2],
+        'max_90': sorted_array[int(len(array) * 0.9)],
+        'min_90': sorted_array[int(len(array) * 0.1)],
         'variance': variance,
         'std_dev': std_dev,
         'count': len(array)
@@ -158,11 +161,13 @@ class Tracer:
         table = prettytable.PrettyTable(title="Duration (s)")
         table.field_names = [
             "function", "min", "max", "total",
-            "mean", "std_dev", "median", "count", "errors"]
+            "mean", "median", "std_dev",
+            "max 90%", "min 90%", "count", "errors"]
         table.float_format = ".4"
         for f, s in r.items():
             table.add_row([f, s['min'], s['max'], s['sum'],
-                           s['mean'], s['std_dev'], s['median'],
+                           s['mean'], s['median'], s['std_dev'],
+                           s['max_90'], s['min_90'],
                            s['count'], len(s['errors'])])
         print(table)
 
@@ -305,28 +310,39 @@ class RbdFioTest(RbdTest):
     def print_results(cls, title="Benchmark results"):
         table = prettytable.PrettyTable(title=title)
         table.field_names = ["stat", "min", "max", "mean",
-                             "median", "std_dev", "total"]
+                             "median", "std_dev",
+                             "max 90%", "min 90%", "total"]
         table.float_format = ".4"
 
         s = array_stats(i["bw_bytes"] / 1000_000 for i in cls.data)
-        table.add_row(["bandwidth (MB/s)", s['min'], s['max'], s['mean'],
-                       s['median'], s['std_dev'], 'N/A'])
+        table.add_row(["bandwidth (MB/s)",
+                       s['min'], s['max'], s['mean'],
+                       s['median'], s['std_dev'],
+                       s['max_90'], s['min_90'], 'N/A'])
 
         s = array_stats(i["runtime"] / 1000 for i in cls.data)
-        table.add_row(["duration (s)", s['min'], s['max'], s['mean'],
-                       s['median'], s['std_dev'], s['sum']])
+        table.add_row(["duration (s)",
+                      s['min'], s['max'], s['mean'],
+                      s['median'], s['std_dev'],
+                      s['max_90'], s['min_90'], s['sum']])
 
         s = array_stats(i["error"] for i in cls.data)
-        table.add_row(["errors", s['min'], s['max'], s['mean'],
-                       s['median'], s['std_dev'], s['sum']])
+        table.add_row(["errors",
+                       s['min'], s['max'], s['mean'],
+                       s['median'], s['std_dev'],
+                       s['max_90'], s['min_90'], s['sum']])
 
         s = array_stats(i["short_ios"] for i in cls.data)
-        table.add_row(["incomplete IOs", s['min'], s['max'], s['mean'],
-                       s['median'], s['std_dev'], s['sum']])
+        table.add_row(["incomplete IOs",
+                       s['min'], s['max'], s['mean'],
+                       s['median'], s['std_dev'],
+                       s['max_90'], s['min_90'], s['sum']])
 
         s = array_stats(i["dropped_ios"] for i in cls.data)
-        table.add_row(["dropped IOs", s['min'], s['max'], s['mean'],
-                       s['median'], s['std_dev'], s['sum']])
+        table.add_row(["dropped IOs",
+                       s['min'], s['max'], s['mean'],
+                       s['median'], s['std_dev'],
+                       s['max_90'], s['min_90'], s['sum']])
         print(table)
 
 
