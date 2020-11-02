@@ -41,6 +41,9 @@ parser.add_argument('--image_prefix',
 parser.add_argument('--image_size_mb',
                     help='The image size in megabytes.',
                     default=1024, type=int)
+parser.add_argument('--map-timeout',
+                    help='Image map timeout.',
+                    default=60, type=int)
 parser.add_argument('--verbose', action='store_true',
                     help='Print info messages.')
 parser.add_argument('--debug', action='store_true',
@@ -97,8 +100,9 @@ def execute(*args, **kwargs):
 
 def array_stats(array):
     array = list(array)
-    mean = sum(array) / len(array)
-    variance = sum((i - mean) ** 2 for i in array) / len(array)
+    mean = sum(array) / len(array) if len(array) else 0
+    variance = (sum((i - mean) ** 2 for i in array) / len(array)
+                if len(array) else 0)
     std_dev = math.sqrt(variance)
     sorted_array = sorted(array)
 
@@ -107,16 +111,16 @@ def array_stats(array):
         'max': max(array),
         'sum': sum(array),
         'mean': mean,
-        'median': sorted_array[len(array) // 2],
-        'max_90': sorted_array[int(len(array) * 0.9)],
-        'min_90': sorted_array[int(len(array) * 0.1)],
+        'median': sorted_array[len(array) // 2] if len(array) else 0,
+        'max_90': sorted_array[int(len(array) * 0.9)] if len(array) else 0,
+        'min_90': sorted_array[int(len(array) * 0.1)] if len(array) else 0,
         'variance': variance,
         'std_dev': std_dev,
         'count': len(array)
     }
 
 class Tracer:
-    data = collections.defaultdict(list)
+    data = collections.OrderedDict()
     lock = threading.Lock()
 
     @classmethod
@@ -124,6 +128,12 @@ class Tracer:
         def wrapper(*args, **kwargs):
             tstart = time.time()
             exc_str = None
+
+            # Preserve call order
+            with cls.lock:
+                if func.__qualname__ not in cls.data:
+                    cls.data[func.__qualname__] = list()
+
             try:
                 return func(*args, **kwargs)
             except Exception as exc:
@@ -142,9 +152,8 @@ class Tracer:
 
     @classmethod
     def get_results(cls):
-        functions = sorted(cls.data.keys())
         stats = collections.OrderedDict()
-        for f in functions:
+        for f in cls.data.keys():
             stats[f] = array_stats([i['duration'] for i in cls.data[f]])
             errors = []
             for i in cls.data[f]:
@@ -196,28 +205,34 @@ class RbdImage(object):
         return RbdImage(name, size_mb, is_shared)
 
     @Tracer.trace
-    def get_disk_number(self, tries=20, retry_interval=2):
-        while tries:
-            LOG.info("Retrieving disk number: %s", self.name)
+    def get_disk_number(self, timeout=60, retry_interval=2):
+        tstart = time.time()
+        elapsed = 0
+        LOG.info("Retrieving disk number: %s", self.name)
+        while elapsed < timeout or not timeout:
             result = execute("rbd-wnbd", "show", self.name, "--format=json")
             disk_info = json.loads(result.stdout)
             disk_number = disk_info["disk_number"]
             if disk_number > 0:
                 LOG.debug("Image %s disk number: %d", self.name, disk_number)
                 return disk_number
-            tries -= 1
             time.sleep(retry_interval)
+            elapsed += (time.time() - tstart)
+            LOG.debug("Could not get disk number. Time elapsed: %d. Timeout: %d",
+                      elapsed, timeout)
 
-        raise CephTestException("Could not get disk number for %s", self.name)
+        raise CephTestException("Could not get disk number for %s."
+                                "Time elapsed: %d. Timeout: %d" %
+                                (self.name, elapsed, timeout))
 
     @Tracer.trace
-    def map(self):
+    def map(self, timeout=60):
         LOG.info("Mapping image: %s", self.name)
 
         execute("rbd-wnbd", "map", self.name)
         self.mapped = True
 
-        self.disk_number = self.get_disk_number()
+        self.disk_number = self.get_disk_number(timeout=timeout)
 
     @Tracer.trace
     def unmap(self):
@@ -243,15 +258,18 @@ class RbdImage(object):
 class RbdTest(object):
     image = None
 
-    def __init__(self, image_prefix="cephTest-", image_size_mb=1024):
+    def __init__(self, image_prefix="cephTest-", image_size_mb=1024,
+                 map_timeout=60):
         self.image_size_mb = image_size_mb
         self.image_name = image_prefix + str(uuid.uuid4())
+        self.map_timeout = map_timeout
 
+    @Tracer.trace
     def initialize(self):
         self.image = RbdImage.create(
             self.image_name,
             self.image_size_mb)
-        self.image.map()
+        self.image.map(timeout=self.map_timeout)
 
     def run(self):
         pass
@@ -293,6 +311,7 @@ class RbdFioTest(RbdTest):
 
     @Tracer.trace
     def run(self):
+        LOG.info("Starting FIO test.")
         cmd = [
             "fio", "--thread", "--output-format=json",
             "--randrepeat=%d" % self.iterations,
@@ -304,6 +323,7 @@ class RbdFioTest(RbdTest):
             "--filename=\\\\.\\PhysicalDrive%d" % self.image.disk_number,
         ]
         result = execute(*cmd)
+        LOG.info("Completed FIO test.")
         self.process_result(result.stdout)
 
     @classmethod
@@ -356,6 +376,7 @@ class TestRunner(object):
         self.lock = threading.Lock()
         self.completed = 0
         self.errors = 0
+        self.stopped = False
 
     def run(self):
         tasks = []
@@ -368,21 +389,32 @@ class TestRunner(object):
             task.result()
 
     def run_single_test(self):
+        if self.stopped:
+            return
+
         try:
             test = self.test_cls(**self.test_params)
             test.initialize()
             test.run()
+        except KeyboardInterrupt:
+            LOG.warning("Received Ctrl-C.")
+            self.stopped = True
         except Exception as ex:
             with self.lock:
                 self.errors += 1
-                LOG.debug(
+                LOG.exception(
                     "Test exception: %s. Total exceptions: %d",
                     ex, self.errors)
         finally:
             try:
                 test.cleanup()
+            except KeyboardInterrupt:
+                LOG.warning("Received Ctrl-C.")
+                self.stopped = True
+                # Retry the cleanup
+                test.cleanup()
             except Exception as ex:
-                LOG.error("Test cleanup failed.")
+                LOG.exception("Test cleanup failed.")
 
             with self.lock:
                 self.completed += 1
@@ -406,6 +438,7 @@ if __name__ == '__main__':
         bs=args.bs,
         op=args.op,
         iodepth=args.fio_depth,
+        map_timeout=args.map_timeout
     )
     runner = TestRunner(
         RbdFioTest,
