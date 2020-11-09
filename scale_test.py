@@ -217,11 +217,16 @@ class RbdImage(object):
                 LOG.debug("Image %s disk number: %d", self.name, disk_number)
                 return disk_number
             time.sleep(retry_interval)
-            elapsed += (time.time() - tstart)
-            LOG.debug("Could not get disk number. Time elapsed: %d. Timeout: %d",
-                      elapsed, timeout)
+            elapsed = time.time() - tstart
+            if elapsed > 10:
+                level = logging.WARNING
+            else:
+                level = logging.DEBUG
+            LOG.log(level,
+                    "Could not get disk number: %s. Time elapsed: %d. Timeout: %d",
+                    self.name, elapsed, timeout)
 
-        raise CephTestException("Could not get disk number for %s."
+        raise CephTestException("Could not get disk number for %s. "
                                 "Time elapsed: %d. Timeout: %d" %
                                 (self.name, elapsed, timeout))
 
