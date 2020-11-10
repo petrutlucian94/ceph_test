@@ -48,6 +48,8 @@ parser.add_argument('--verbose', action='store_true',
                     help='Print info messages.')
 parser.add_argument('--debug', action='store_true',
                     help='Print debug messages.')
+parser.add_argument('--stop-on-error', action='store_true',
+                    help='Stop testing when hitting errors.')
 
 
 class CephTestException(Exception):
@@ -107,9 +109,9 @@ def array_stats(array):
     sorted_array = sorted(array)
 
     return {
-        'min': min(array),
-        'max': max(array),
-        'sum': sum(array),
+        'min': min(array) if len(array) else 0,
+        'max': max(array) if len(array) else 0,
+        'sum': sum(array) if len(array) else 0,
         'mean': mean,
         'median': sorted_array[len(array) // 2] if len(array) else 0,
         'max_90': sorted_array[int(len(array) * 0.9)] if len(array) else 0,
@@ -372,7 +374,8 @@ class RbdFioTest(RbdTest):
 
 
 class TestRunner(object):
-    def __init__(self, test_cls, test_params=None, iterations=1, workers=1):
+    def __init__(self, test_cls, test_params=None, iterations=1, workers=1,
+                 stop_on_error=False):
         self.test_cls = test_cls
         self.test_params = test_params or {}
         self.iterations = iterations
@@ -382,6 +385,7 @@ class TestRunner(object):
         self.completed = 0
         self.errors = 0
         self.stopped = False
+        self.stop_on_error = stop_on_error
 
     def run(self):
         tasks = []
@@ -405,6 +409,8 @@ class TestRunner(object):
             LOG.warning("Received Ctrl-C.")
             self.stopped = True
         except Exception as ex:
+            if self.stop_on_error:
+                self.stopped = True
             with self.lock:
                 self.errors += 1
                 LOG.exception(
@@ -449,7 +455,8 @@ if __name__ == '__main__':
         RbdFioTest,
         test_params=test_params,
         iterations=args.iterations,
-        workers=args.concurrency)
+        workers=args.concurrency,
+        stop_on_error=args.stop_on_error)
     runner.run()
 
     Tracer.print_results()
