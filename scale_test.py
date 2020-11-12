@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import prettytable
+import random
 import subprocess
 import time
 import threading
@@ -13,6 +14,9 @@ import uuid
 LOG = logging.getLogger()
 
 parser = argparse.ArgumentParser(description='rbd-wnbd tests')
+parser.add_argument('--test-name',
+                    help='The test to be run.',
+                    default="RbdFioTest")
 parser.add_argument('--iterations',
                     help='Total number of test iterations',
                     default=1, type=int)
@@ -35,10 +39,10 @@ parser.add_argument('--bs',
 parser.add_argument('--op',
                     help='Benchmark operation.',
                     default="read")
-parser.add_argument('--image_prefix',
+parser.add_argument('--image-prefix',
                     help='The image name prefix.',
                     default="cephTest-")
-parser.add_argument('--image_size_mb',
+parser.add_argument('--image-size-mb',
                     help='The image size in megabytes.',
                     default=1024, type=int)
 parser.add_argument('--map-timeout',
@@ -232,6 +236,10 @@ class RbdImage(object):
                                 "Time elapsed: %d. Timeout: %d" %
                                 (self.name, elapsed, timeout))
 
+    @property
+    def path(self):
+        return "\\\\.\\PhysicalDrive%d" % self.disk_number
+
     @Tracer.trace
     def map(self, timeout=60):
         LOG.info("Mapping image: %s", self.name)
@@ -266,7 +274,7 @@ class RbdTest(object):
     image = None
 
     def __init__(self, image_prefix="cephTest-", image_size_mb=1024,
-                 map_timeout=60):
+                 map_timeout=60, **kwargs):
         self.image_size_mb = image_size_mb
         self.image_name = image_prefix + str(uuid.uuid4())
         self.map_timeout = map_timeout
@@ -284,6 +292,13 @@ class RbdTest(object):
     def cleanup(self):
         if self.image:
             self.image.cleanup()
+
+    def run(self):
+        pass
+
+    @classmethod
+    def print_results(cls, title="Test results", description=None):
+        pass
 
 class RbdFioTest(RbdTest):
     data = []
@@ -327,14 +342,16 @@ class RbdFioTest(RbdTest):
             "--size=%sM" % self.fio_size_mb,
             "--readwrite=%s" % self.op,
             "--numjobs=%s" % self.workers,
-            "--filename=\\\\.\\PhysicalDrive%d" % self.image.disk_number,
+            "--filename=%s" % self.image.path,
         ]
         result = execute(*cmd)
         LOG.info("Completed FIO test.")
         self.process_result(result.stdout)
 
     @classmethod
-    def print_results(cls, title="Benchmark results"):
+    def print_results(cls, title="Benchmark results", description=None):
+        if description:
+            title = "%s (%s)" % (title, description)
         table = prettytable.PrettyTable(title=title)
         table.field_names = ["stat", "min", "max", "mean",
                              "median", "std_dev",
@@ -373,6 +390,42 @@ class RbdFioTest(RbdTest):
         print(table)
 
 
+class RbdStampTest(RbdTest):
+    @staticmethod
+    def _rand_float(min_val, max_val):
+        return min_val + (random.random() * max_val - min_val);
+
+    def _get_stamp(self):
+        buff = self.image_name.encode()
+        padding = 512 - len(buff)
+        buff += b'\0' * padding
+        return buff
+
+    @Tracer.trace
+    def _write_stamp(self):
+        with open(self.image.path, 'rb+') as disk:
+            stamp = self._get_stamp()
+            disk.write(stamp)
+
+    @Tracer.trace
+    def _read_stamp(self):
+        with open(self.image.path, 'rb') as disk:
+            return disk.read(len(self._get_stamp()))
+
+    @Tracer.trace
+    def run(self):
+        # Wait up to 5 seconds and then check the disk,
+        # ensuring that nobody else wrote to it.
+        time.sleep(self._rand_float(0, 5))
+        stamp = self._read_stamp()
+        assert(stamp == b'\0' * len(self._get_stamp()))
+
+        self._write_stamp()
+
+        stamp = self._read_stamp()
+        assert(stamp == self._get_stamp())
+
+
 class TestRunner(object):
     def __init__(self, test_cls, test_params=None, iterations=1, workers=1,
                  stop_on_error=False):
@@ -387,6 +440,7 @@ class TestRunner(object):
         self.stopped = False
         self.stop_on_error = stop_on_error
 
+    @Tracer.trace
     def run(self):
         tasks = []
         for i in range(self.iterations):
@@ -432,6 +486,11 @@ class TestRunner(object):
                 LOG.info("Completed tests: %d. Pending: %d",
                          self.completed, self.iterations - self.completed)
 
+TESTS = {
+    'RbdTest': RbdTest,
+    'RbdFioTest': RbdFioTest,
+    'RbdStampTest': RbdStampTest
+}
 
 if __name__ == '__main__':
     args = parser.parse_args()
@@ -451,8 +510,13 @@ if __name__ == '__main__':
         iodepth=args.fio_depth,
         map_timeout=args.map_timeout
     )
+
+    test_cls = TESTS.get(args.test_name)
+    if not test_cls:
+        raise CephTestException("Unkown test: %s", args.test_name)
+
     runner = TestRunner(
-        RbdFioTest,
+        test_cls,
         test_params=test_params,
         iterations=args.iterations,
         workers=args.concurrency,
@@ -460,6 +524,6 @@ if __name__ == '__main__':
     runner.run()
 
     Tracer.print_results()
-    RbdFioTest.print_results(
-        "Benchmark results (count: %d, concurrency: %d)" %
+    test_cls.print_results(
+        description="count: %d, concurrency: %d" %
             (args.iterations, args.concurrency))
