@@ -54,6 +54,8 @@ parser.add_argument('--debug', action='store_true',
                     help='Print debug messages.')
 parser.add_argument('--stop-on-error', action='store_true',
                     help='Stop testing when hitting errors.')
+parser.add_argument('--skip-cleanup-on-error', action='store_true',
+                    help='Skip cleanup when hitting errors.')
 
 
 class CephTestException(Exception):
@@ -428,7 +430,7 @@ class RbdStampTest(RbdTest):
 
 class TestRunner(object):
     def __init__(self, test_cls, test_params=None, iterations=1, workers=1,
-                 stop_on_error=False):
+                 stop_on_error=False, cleanup_on_error=True):
         self.test_cls = test_cls
         self.test_params = test_params or {}
         self.iterations = iterations
@@ -439,6 +441,7 @@ class TestRunner(object):
         self.errors = 0
         self.stopped = False
         self.stop_on_error = stop_on_error
+        self.cleanup_on_error = cleanup_on_error
 
     @Tracer.trace
     def run(self):
@@ -452,6 +455,7 @@ class TestRunner(object):
             task.result()
 
     def run_single_test(self):
+        failed = False
         if self.stopped:
             return
 
@@ -463,6 +467,7 @@ class TestRunner(object):
             LOG.warning("Received Ctrl-C.")
             self.stopped = True
         except Exception as ex:
+            failed = True
             if self.stop_on_error:
                 self.stopped = True
             with self.lock:
@@ -471,15 +476,16 @@ class TestRunner(object):
                     "Test exception: %s. Total exceptions: %d",
                     ex, self.errors)
         finally:
-            try:
-                test.cleanup()
-            except KeyboardInterrupt:
-                LOG.warning("Received Ctrl-C.")
-                self.stopped = True
-                # Retry the cleanup
-                test.cleanup()
-            except Exception as ex:
-                LOG.exception("Test cleanup failed.")
+            if not failed or self.cleanup_on_error:
+                try:
+                    test.cleanup()
+                except KeyboardInterrupt:
+                    LOG.warning("Received Ctrl-C.")
+                    self.stopped = True
+                    # Retry the cleanup
+                    test.cleanup()
+                except Exception as ex:
+                    LOG.exception("Test cleanup failed.")
 
             with self.lock:
                 self.completed += 1
@@ -520,7 +526,8 @@ if __name__ == '__main__':
         test_params=test_params,
         iterations=args.iterations,
         workers=args.concurrency,
-        stop_on_error=args.stop_on_error)
+        stop_on_error=args.stop_on_error,
+        cleanup_on_error=not args.skip_cleanup_on_error)
     runner.run()
 
     Tracer.print_results()
