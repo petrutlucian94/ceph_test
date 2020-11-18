@@ -1,3 +1,10 @@
+# Copyright (C) 2020 Cloudbase Solutions
+#
+# This is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License version 2.1, as published by the Free Software
+# Foundation (see LICENSE).
+
 import argparse
 import collections
 from concurrent import futures
@@ -224,7 +231,7 @@ class RbdImage(object):
             if disk_number > 0:
                 LOG.debug("Image %s disk number: %d", self.name, disk_number)
                 return disk_number
-            time.sleep(retry_interval)
+
             elapsed = time.time() - tstart
             if elapsed > 10:
                 level = logging.WARNING
@@ -234,9 +241,43 @@ class RbdImage(object):
                     "Could not get disk number: %s. Time elapsed: %d. Timeout: %d",
                     self.name, elapsed, timeout)
 
+            time.sleep(retry_interval)
+            elapsed = time.time() - tstart
+
         raise CephTestException("Could not get disk number for %s. "
                                 "Time elapsed: %d. Timeout: %d" %
                                 (self.name, elapsed, timeout))
+
+    @Tracer.trace
+    def _wait_for_disk(self, timeout=60, retry_interval=2):
+        tstart = time.time()
+        elapsed = 0
+        LOG.debug("Waiting for disk to be accessible: %s %s",
+                  self.name, self.path)
+        while elapsed < timeout or not timeout:
+            try:
+                with open(self.path, 'rb') as disk:
+                    return
+            except FileNotFoundError:
+                pass
+
+            elapsed = time.time() - tstart
+            if elapsed > 10:
+                level = logging.WARNING
+            else:
+                level = logging.DEBUG
+            LOG.log(level,
+                    "The mapped disk isn't accessible yet: %s %s. "
+                    "Time elapsed: %d. Timeout: %d",
+                    self.name, self.path, elapsed, timeout)
+
+            time.sleep(retry_interval)
+            elapsed = time.time() - tstart
+
+        raise CephTestException(
+            "The mapped disk isn't accessible yet: %s %s. "
+            "Time elapsed: %d. Timeout: %d" %
+            (self.name, self.path, elapsed, timeout))
 
     @property
     def path(self):
@@ -245,11 +286,15 @@ class RbdImage(object):
     @Tracer.trace
     def map(self, timeout=60):
         LOG.info("Mapping image: %s", self.name)
+        tstart = time.time()
 
         execute("rbd-wnbd", "map", self.name)
         self.mapped = True
 
         self.disk_number = self.get_disk_number(timeout=timeout)
+
+        elapsed = time.time() - tstart
+        self._wait_for_disk(timeout=timeout - elapsed, )
 
     @Tracer.trace
     def unmap(self):
