@@ -102,21 +102,25 @@ try {
     $driveLetter = (Get-Partition -DiskNumber $diskNumber -PartitionNumber 2).DriveLetter
 
     $testPath = "${driveLetter}:\"
-    if($testListFiles) {
-        write_files $testPath $testFileCount
-    }
-    if($doEject) {
-        log_message "Ejecting volume"
-        # flush-volume $driveLetter
-        # set-disk -Number $diskNumber -IsOffline:$true
-        eject_volume $driveLetter
-    }
-
-    if ($fioRun) {
-        run_fio $testPath $fioSize
-    }
 
     1..$iterationCount | % {
+        log_message "Cleaning up ${testPath}\*"
+        rm "${testPath}\*"
+
+        if($testListFiles) {
+            write_files $testPath $testFileCount
+        }
+        if ($fioRun) {
+            run_fio $testPath $fioSize
+        }
+
+        if($doEject) {
+            log_message "Ejecting volume"
+            # flush-volume $driveLetter
+            # set-disk -Number $diskNumber -IsOffline:$true
+            eject_volume $driveLetter
+        }
+
         log_message "Unmapping image"
         rbd-wnbd unmap $imageName
         $mapped = $false
