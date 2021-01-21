@@ -3,7 +3,13 @@ Param(
     $imageNamePrefix="cephCacheTest-",
     $reinstallDriver=$false,
     $driverInstallScript="C:\wnbd\reinstall.ps1",
-    $testFileCount = 50
+    $fileSystem="NTFS",
+    $doEject=$false,
+    $fioRun=$false,
+    $fioSize="500M",
+    $testFileCount=50,
+    $testListFiles=$true,
+    $iterationCount=1
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,14 +40,27 @@ function get_disk_number($image, $tries=5, $tryInterval=2) {
 }
 
 function write_files($path, $count) {
-    1..$count | % { echo $count > "$path\$count.txt" }
+    log_message "Writing $count test files."
+    1..$count | % { echo $_ > "$path\$_.txt" }
+}
+
+function run_fio($path, $size) {
+    # Unfortunately the "--filename" parameter doesn't work with
+    # Windows partitions.
+    pushd $path
+    log_message "Running fio: $path $size"
+    fio --randrepeat=1 --direct=1 --gtod_reduce=1 `
+        --name=test --bs=2M --iodepth=64 --size=$size `
+        --readwrite=randwrite --numjobs=1
+    popd
 }
 
 function check_files($path, $count) {
+    log_message "Checking $count test files."
     1..$count | % {
-        $file = "$path\$count.txt"
+        $file = "$path\$_.txt"
         $content = gc $file
-        if ($count -ne $content) {
+        if ($_ -ne $content) {
             throw "Invalid file $file content: $content"
         }
     }
@@ -78,30 +97,44 @@ try {
     Get-Disk -Number $diskNumber | `
         Initialize-Disk -PassThru | `
         New-Partition -AssignDriveLetter -UseMaximumSize | `
-        Format-Volume -Force -Confirm:$false
+        Format-Volume -FileSystem $fileSystem -Force -Confirm:$false
 
     $driveLetter = (Get-Partition -DiskNumber $diskNumber -PartitionNumber 2).DriveLetter
 
     $testPath = "${driveLetter}:\"
-    write_files $testPath $testFileCount
-    # flush-volume $driveLetter
-    # set-disk -Number $diskNumber -IsOffline:$true
-    log_message "Ejecting volume"
-    eject_volume $driveLetter
+    if($testListFiles) {
+        write_files $testPath $testFileCount
+    }
+    if($doEject) {
+        log_message "Ejecting volume"
+        # flush-volume $driveLetter
+        # set-disk -Number $diskNumber -IsOffline:$true
+        eject_volume $driveLetter
+    }
 
-    log_message "Unmapping image"
-    rbd-wnbd unmap $imageName
-    $mapped = $false
+    if ($fioRun) {
+        run_fio $testPath $fioSize
+    }
 
-    rbd-wnbd map $imageName
-    $mapped = $true
+    1..$iterationCount | % {
+        log_message "Unmapping image"
+        rbd-wnbd unmap $imageName
+        $mapped = $false
 
-    $diskNumber = get_disk_number $imageName
-    $driveLetter = (Get-Partition -DiskNumber $diskNumber -PartitionNumber 2).DriveLetter
-    $testPath = "${driveLetter}:\"
-    log_message "Remapped image: $imageName. Disk number: $diskNumber. Drive letter: $driveLetter"
+        rbd-wnbd map $imageName
+        $mapped = $true
 
-    check_files $testPath $testFileCount
+        $diskNumber = get_disk_number $imageName
+        $driveLetter = (Get-Partition -DiskNumber $diskNumber -PartitionNumber 2).DriveLetter
+        $testPath = "${driveLetter}:\"
+        log_message "Remapped image: $imageName. Disk number: $diskNumber. Drive letter: $driveLetter"
+
+        if($testListFiles) {
+            check_files $testPath $testFileCount
+        }
+        log_message "Partition info:"
+        get-volume $driveLetter
+    }
 }
 finally {
     if($mapped) {
