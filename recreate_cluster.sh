@@ -11,8 +11,9 @@ DEBUG=${DEBUG:-}
 CLEAN=${CLEAN:-}
 SKIP_DEFAULT_IMAGES=${SKIP_DEFAULT_IMAGES:-}
 IP=${IP:-192.168.122.1}
-VSTART_DIR=${VSTART_DIR:-"/mnt/sdb1/vstart"}
-MEMSTORE_BYTES=${MEMSTORE_BYTES:-16106127360}
+VSTART_DIR=${VSTART_DIR:-"/tmp/vstart"}
+MEMSTORE_BYTES=${MEMSTORE_BYTES:-4294967296}
+BLUESTORE_BYTES=${BLUESTORE_BYTES:-4294967296}
 BIND_IPV6=${BIND_IPV6:-"false"}
 USE_MEMSTORE=${USE_MEMSTORE:-}
 
@@ -31,12 +32,15 @@ mkdir -p $VSTART_DIR/out
 ../src/stop.sh
 
 memstore_args=""
+bluestore_args=""
 if [[ -n $USE_MEMSTORE ]]; then
     memstore_args="--memstore -o \"memstore_device_bytes=$MEMSTORE_BYTES\""
+else
+    bluestore_args="-o bluestore_block_size=$BLUESTORE_BYTES"
 fi
 
 OSD_POOL_DEFAULT_SIZE=1 VSTART_DEST=$VSTART_DIR ../src/vstart.sh \
-    $dbg_flag $clean_flag $memstore_args \
+    $dbg_flag $clean_flag $memstore_args $bluestore_args \
     -o "ms bind ipv6 = $BIND_IPV6" \
     -i $IP \
     2>&1 | tee $VSTART_DIR/vstart.log
@@ -70,5 +74,7 @@ if [[ -n $CLEAN && -z $SKIP_DEFAULT_IMAGES ]]; then
     rbd create iscsi_win_10g --size 10GB
     rbd create iscsi_linux_10g --size 10GB
 fi
+
+ceph config set osd bluestore_block_size $BLUESTORE_BYTES
 
 # sudo systemctl restart *rbd*
